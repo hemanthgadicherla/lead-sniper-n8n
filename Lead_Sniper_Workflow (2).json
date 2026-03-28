@@ -199,7 +199,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "=https://hooks.slack.com/services/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",
+        "url": "YOUR_SLACK_WEBHOOK_URL",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
