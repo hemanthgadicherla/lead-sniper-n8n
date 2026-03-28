@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Lead Sniper — Logic Log</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: Arial, sans-serif; font-size: 13px; color: #1a1a1a; background: #fff; max-width: 860px; margin: 0 auto; padding: 48px 52px; }
+  .cover-title { font-size: 28px; font-weight: 700; color: #1A4B7A; margin-bottom: 6px; }
+  .cover-sub { font-size: 14px; color: #666; margin-bottom: 40px; }
+  h1 { font-size: 18px; font-weight: 700; color: #1A4B7A; margin: 32px 0 10px; border-bottom: 2px solid #1A4B7A; padding-bottom: 4px; }
+  h2 { font-size: 15px; font-weight: 700; color: #2C6FAC; margin: 22px 0 8px; }
+  p { margin-bottom: 12px; line-height: 1.7; }
+  ul { margin: 0 0 12px 24px; }
+  ul li { margin-bottom: 5px; line-height: 1.6; }
+  b { font-weight: 700; }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 16px; font-size: 12.5px; }
+  th { background: #1A4B7A; color: #fff; padding: 8px 12px; text-align: left; font-weight: 700; }
+  td { background: #f7f8fa; padding: 7px 12px; border: 1px solid #ddd; vertical-align: top; }
+  tr:nth-child(even) td { background: #eef2f7; }
+  code { background: #f0f0f0; padding: 2px 6px; border-radius: 3px; font-family: Consolas, monospace; font-size: 11.5px; color: #c0392b; }
+  .callout { background: #EEF5FF; border-left: 4px solid #2C6FAC; padding: 10px 14px; margin: 12px 0; border-radius: 0 6px 6px 0; }
+  .footer { margin-top: 48px; padding-top: 14px; border-top: 2px solid #1A4B7A; font-size: 11px; color: #888; text-align: center; }
+  @media print { body { padding: 24px 32px; } }
+</style>
+</head>
+<body>
+
+<div class="cover-title">Lead Sniper — Logic Log</div>
+<div class="cover-sub">Assignment 1 &nbsp;|&nbsp; n8n Workflow Documentation &nbsp;|&nbsp; March 2026</div>
+
+<h1>1. Workflow Overview</h1>
+<p>This workflow automatically monitors new stargazers on a GitHub repository, enriches each user's profile via the GitHub REST API, filters for high-value leads based on follower count and public repo count, uses an LLM to generate a personalized sales pitch, and posts a formatted Block Kit alert to Slack.</p>
+
+<h1>2. GitHub API Rate Limit Strategy</h1>
+<p>GitHub's REST API enforces strict rate limits. This section explains exactly how the workflow handles them.</p>
+
+<table>
+  <tr><th>Scenario</th><th>Rate Limit</th></tr>
+  <tr><td>Unauthenticated requests</td><td>60 requests / hour</td></tr>
+  <tr><td>Authenticated (PAT) requests</td><td>5,000 requests / hour</td></tr>
+  <tr><td>Search API (authenticated)</td><td>30 requests / minute</td></tr>
+  <tr><td>Stargazers per API page</td><td>Up to 100 items per call</td></tr>
+</table>
+
+<h2>2.1 Authentication Header</h2>
+<p>Every HTTP Request node sends an <code>Authorization</code> header with a GitHub Personal Access Token (PAT) stored as an n8n <b>httpHeaderAuth</b> credential. This upgrades the anonymous 60 req/hr limit to 5,000 req/hr.</p>
+<ul>
+  <li><b>Header:</b> <code>Authorization: Bearer &lt;YOUR_GITHUB_PAT&gt;</code></li>
+  <li><b>Also sent:</b> <code>Accept: application/vnd.github+json</code></li>
+  <li><b>Also sent:</b> <code>X-GitHub-Api-Version: 2022-11-28</code></li>
+</ul>
+<p>The PAT only needs the <b>public_repo read</b> scope — no write permissions required.</p>
+
+<h2>2.2 Per-User Delay (Wait Node)</h2>
+<p>Each stargazer is processed one at a time via a <b>SplitInBatches</b> node (batch size = 1). A <b>Wait</b> node introduces a 1-second pause between each <code>/users/{login}</code> enrichment call.</p>
+<ul>
+  <li>Maximum throughput: ~60 enrichment calls / minute</li>
+  <li>Well within the 5,000/hour authenticated limit</li>
+  <li>Prevents burst spikes that trigger GitHub's secondary rate limits</li>
+</ul>
+<div class="callout">GitHub can apply secondary rate limits (HTTP 429) even within the primary quota if requests arrive too fast in a short window. The 1-second wait eliminates this risk entirely.</div>
+
+<h2>2.3 Rate Limit Response Headers</h2>
+<p>GitHub returns these headers on every response. Enable <b>Full Response</b> on the HTTP Request node to access them:</p>
+<ul>
+  <li><code>X-RateLimit-Remaining</code> — requests left in current window</li>
+  <li><code>X-RateLimit-Reset</code> — Unix timestamp when the quota resets</li>
+  <li><code>Retry-After</code> — seconds to wait if a 429 is returned</li>
+</ul>
+<p><b>Recommended enhancement:</b> add a Code node after each GitHub call that checks <code>X-RateLimit-Remaining</code>. If the value drops below 100, trigger an additional Wait node (60 seconds) before continuing.</p>
+
+<h2>2.4 Polling Frequency</h2>
+<p>The <b>Schedule Trigger</b> fires every <b>15 minutes</b>. Each poll fetches the stargazers list with <code>per_page=30</code>, processing at most 30 new stars per cycle.</p>
+<ul>
+  <li>Maximum: 4 stargazer list calls/hour per repo</li>
+  <li>Maximum: 120 enrichment calls/hour at full 30-per-cycle throughput</li>
+  <li>This is only 2.4% of the authenticated rate limit — extremely conservative</li>
+</ul>
+
+<h1>3. Filter Logic</h1>
+<p>The <b>IF node</b> uses an <b>ANY</b> combinator (logical OR) with two conditions:</p>
+<table>
+  <tr><th>Condition</th><th>n8n Expression</th><th>Meaning</th></tr>
+  <tr><td>High follower count</td><td><code>{{ $json.followers }} &gt; 100</code></td><td>Influential developer or public figure</td></tr>
+  <tr><td>Active contributor</td><td><code>{{ $json.public_repos }} &gt; 50</code></td><td>Prolific builder, likely technically sophisticated</td></tr>
+</table>
+<p>If <b>either</b> condition is true, the user proceeds to the AI pitch node. If both are false, the <b>false output branch is left unconnected</b> — n8n silently terminates the execution branch with no error or noise.</p>
+
+<h1>4. AI Pitch Node</h1>
+<p>The <b>OpenAI node</b> (model: <code>gpt-4o-mini</code>) receives a constrained prompt injecting the user's <code>name</code>, <code>company</code>, <code>bio</code>, <code>location</code>, <code>public_repos</code>, and <code>followers</code>. It is instructed to output exactly <b>one sentence under 25 words</b>.</p>
+<ul>
+  <li><b>Model chosen:</b> gpt-4o-mini — cost-efficient ($0.00015/1K input tokens)</li>
+  <li><b>Estimated cost:</b> ~$0.0001 per lead → under $1/month for 10,000 leads</li>
+  <li><b>The bio field</b> is the most signal-rich — it often reveals tech stack, interests, and seniority</li>
+</ul>
+
+<h1>5. Slack Output Format</h1>
+<p>The <b>Build Slack Payload</b> Code node assembles a Slack Block Kit message with these sections:</p>
+<ul>
+  <li><b>Header block:</b> "🎯 New High-Value Lead"</li>
+  <li><b>Fields section:</b> Name (hyperlinked to GitHub), Company, Followers, Public Repos, Location, Account Created</li>
+  <li><b>Bio section:</b> Full bio text</li>
+  <li><b>AI Pitch section:</b> Generated pitch in a blockquote</li>
+  <li><b>Divider:</b> Visual separator for multi-lead feeds</li>
+</ul>
+
+<h1>6. Credentials Required</h1>
+<table>
+  <tr><th>Credential</th><th>How to Create</th></tr>
+  <tr><td>GitHub PAT (httpHeaderAuth)</td><td>GitHub → Settings → Developer settings → Personal access tokens → Fine-grained. Scope: <b>Contents: read-only</b> on public repos.</td></tr>
+  <tr><td>OpenAI API Key (openAiApi)</td><td>platform.openai.com → API Keys. Add to n8n as an "OpenAI" credential.</td></tr>
+  <tr><td>Slack Incoming Webhook URL</td><td>api.slack.com → Your Apps → Incoming Webhooks → Add new webhook. Paste the URL directly into the "Post to Slack" HTTP node.</td></tr>
+</table>
+
+<h1>7. Import Instructions</h1>
+<ul>
+  <li>In n8n, click <b>+ New Workflow</b> → <b>Import from file</b> → upload <code>lead_sniper_workflow.json</code></li>
+  <li>Open the <b>Get Stargazers</b> node and update the URL to your target repo (default: <code>tiangolo/fastapi</code>)</li>
+  <li>Assign your GitHub PAT credential to both HTTP Request nodes</li>
+  <li>Assign your OpenAI credential to the Generate Sales Pitch node</li>
+  <li>Paste your Slack Webhook URL into the Post to Slack node</li>
+  <li>Click <b>Execute Workflow</b> once manually (uses pinned test data — no live API calls)</li>
+  <li>Click <b>Activate</b> to start the 15-minute polling schedule</li>
+</ul>
+
+<div class="footer">Lead Sniper — Assignment 1 Submission &nbsp;|&nbsp; Powered by n8n + GitHub API + OpenAI + Slack</div>
+
+</body>
+</html>
