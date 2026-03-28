@@ -18,6 +18,14 @@ Automated High-Value Lead tracker that monitors GitHub repository stars.
 5. Generate AI sales pitch
 6. Post formatted alert to Slack
 
+## Screenshots
+
+### n8n Workflow
+![n8n Workflow](n8n_workflow.png)
+
+### Slack Output
+![Slack Output](slack_output.png)
+
 ## Setup
 
 ### Prerequisites
