@@ -1,0 +1,426 @@
+{
+  "name": "Lead Sniper",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "d9c014f9-0efa-4a54-989b-77783a3b1332",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        240,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.github.com/repos/tiangolo/fastapi/stargazers",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "per_page",
+              "value": "30"
+            },
+            {
+              "name": "page",
+              "value": "1"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github.star+json"
+            },
+            {
+              "name": "X-GitHub-Api-Version",
+              "value": "2022-11-28"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {}
+          }
+        }
+      },
+      "id": "313d09c5-985d-4067-ad9a-77f884d643ff",
+      "name": "Get Stargazers",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        464,
+        -80
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "JNU6qOzkYlJVwtgs",
+          "name": "Lead Sniper"
+        }
+      },
+      "notes": "Uses Accept: application/vnd.github.star+json to get starred_at timestamps. Requires a GitHub PAT with public repo read scope in httpHeaderAuth credential (Authorization: Bearer <token>). Rate limit: 5000 req/hr authenticated."
+    },
+    {
+      "parameters": {
+        "options": {
+          "reset": false
+        }
+      },
+      "id": "644e0e9e-cb3d-412b-8145-3a1ac91e447f",
+      "name": "Split In Batches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        688,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 1
+      },
+      "id": "81e6c5f4-4558-4c3f-8cc8-12f2509f824f",
+      "name": "Wait 1 Second",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        912,
+        -80
+      ],
+      "webhookId": "rate-limit-wait"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.github.com/users/{{ $json.user.login }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            },
+            {
+              "name": "X-GitHub-Api-Version",
+              "value": "2022-11-28"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "289e4fd5-09c2-462e-be79-a4e987cd61e4",
+      "name": "Enrich User Profile",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1136,
+        -80
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "JNU6qOzkYlJVwtgs",
+          "name": "Lead Sniper"
+        }
+      },
+      "notes": "Fetches full profile from /users/{login}. The starred_at field from the previous step is passed along for deduplication in a future Code node."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-followers",
+              "leftValue": "={{ $json.followers }}",
+              "rightValue": 100,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            },
+            {
+              "id": "cond-repos",
+              "leftValue": "={{ $json.public_repos }}",
+              "rightValue": 50,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "any"
+        },
+        "options": {}
+      },
+      "id": "100c97b9-c438-4858-9003-2305aa50c078",
+      "name": "High-Value Filter",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1360,
+        -80
+      ],
+      "notes": "Passes if followers > 100 OR public_repos > 50. The 'true' output goes to the AI node; the 'false' output is left unconnected (flow terminates silently)."
+    },
+    {
+      "parameters": {
+        "jsCode": "const profile = $('Enrich User Profile').first().json;\nconst pitch = $input.first().json.text;\n\nconst blocks = [\n  { type: 'header', text: { type: 'plain_text', text: '🎯 New High-Value Lead' } },\n  { type: 'section', fields: [\n    { type: 'mrkdwn', text: `*Name*\\n${profile.name ?? profile.login}` },\n    { type: 'mrkdwn', text: `*Company*\\n${profile.company ?? '_Unknown_'}` },\n    { type: 'mrkdwn', text: `*Followers*\\n${profile.followers}` },\n    { type: 'mrkdwn', text: `*Public Repos*\\n${profile.public_repos}` }\n  ]},\n  { type: 'section', text: { type: 'mrkdwn', text: `*Bio*\\n${profile.bio ?? '_No bio_'}` } },\n  { type: 'section', text: { type: 'mrkdwn', text: `*AI Sales Pitch*\\n> ${pitch}` } },\n  { type: 'divider' }\n];\n\nreturn [{ json: { blocks, text: `New lead: ${profile.name ?? profile.login}` } }];"
+      },
+      "id": "86a3acc5-e041-4c5e-a20c-82243fa74da6",
+      "name": "Build Slack Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1936,
+        -80
+      ],
+      "notes": "Assembles a Slack Block Kit message. References the original profile node to merge pitch + profile data cleanly."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "YOUR_SLACK_WEBHOOK_URL",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "101e1f2e-f9fc-40eb-a7e9-a5a91b890a47",
+      "name": "Post to Slack",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2160,
+        -80
+      ],
+      "notes": "Replace with your Slack Incoming Webhook URL. For Discord: use the Discord channel webhook URL and change payload to { content: '...', embeds: [...] }."
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are a B2B sales assistant. A developer just starred our open-source repository. Based on the profile below, write exactly ONE punchy sentence explaining why we should reach out to them and what value we could offer. Do not use placeholder text. Keep it under 25 words.\n\nName: {{ $json.name }}\nCompany: {{ $json.company }}\nBio: {{ $json.bio }}\nLocation: {{ $json.location }}\nPublic repos: {{ $json.public_repos }}\nFollowers: {{ $json.followers }}",
+        "batching": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        1584,
+        -80
+      ],
+      "id": "2db2c09b-7a49-49e5-9c56-f1d1f3699ef5",
+      "name": "Basic LLM Chain"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        1656,
+        144
+      ],
+      "id": "30a2ac70-fee2-4774-9150-9a430e4fe9a4",
+      "name": "Google Gemini Chat Model",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "OvgqoZtQQm4ZT6jE",
+          "name": "Lead Sniper"
+        }
+      }
+    }
+  ],
+  "pinData": {
+    "Get Stargazers": [
+      {
+        "json": {
+          "starred_at": "2024-03-20T10:00:00Z",
+          "user": {
+            "login": "octocat",
+            "id": 1,
+            "avatar_url": "https://github.com/images/error/octocat_happy.gif",
+            "type": "User"
+          }
+        }
+      }
+    ],
+    "Enrich User Profile": [
+      {
+        "json": {
+          "login": "octocat",
+          "id": 1,
+          "name": "monalisa octocat",
+          "company": "GitHub",
+          "blog": "https://github.com/blog",
+          "location": "San Francisco",
+          "email": "octocat@github.com",
+          "bio": "Design and build all the things. Interested in Open Source and AI.",
+          "public_repos": 52,
+          "public_gists": 4,
+          "followers": 120,
+          "following": 20,
+          "created_at": "2008-01-14T04:33:35Z",
+          "updated_at": "2024-03-20T10:00:00Z",
+          "html_url": "https://github.com/octocat"
+        }
+      }
+    ]
+  },
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get Stargazers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Stargazers": {
+      "main": [
+        [
+          {
+            "node": "Split In Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split In Batches": {
+      "main": [
+        [
+          {
+            "node": "Wait 1 Second",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Wait 1 Second",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 1 Second": {
+      "main": [
+        [
+          {
+            "node": "Enrich User Profile",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enrich User Profile": {
+      "main": [
+        [
+          {
+            "node": "High-Value Filter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "High-Value Filter": {
+      "main": [
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Slack Payload": {
+      "main": [
+        [
+          {
+            "node": "Post to Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Basic LLM Chain": {
+      "main": [
+        [
+          {
+            "node": "Build Slack Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "60299038-4634-423e-bb8c-28e9f5fbf33b",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "969257b09ad2942bbaff2e2288304f4969030574d109cdeca05bf11f630884df"
+  },
+  "id": "P0cLNV9TYvOWqZ4r",
+  "tags": []
+}
